@@ -124,6 +124,20 @@ class Batters:
         self._proj = None
         self._proj_fetched = False
 
+    @staticmethod
+    def _fetch_position_map() -> pd.Series:
+        """Fetch playerid → position string from FanGraphs steamer batting projections."""
+        url = 'https://www.fangraphs.com/api/projections?stats=bat&type=steamer&pos=all&teamid=0&players=0'
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = pd.DataFrame(resp.json())[['playerid', 'minpos']]
+            # Normalize playerid to clean int string ("15640.0" → "15640") for reliable join
+            data['playerid'] = data['playerid'].astype(float).astype(int).astype(str)
+            return data.set_index('playerid')['minpos']
+        except Exception:
+            return pd.Series(dtype=str)
+
     def _fetch(self):
         if self._fetched:
             return
@@ -137,6 +151,12 @@ class Batters:
         ev_cols_available = [c for c in ev_cols if c in statcast.columns]
 
         self._merged = raw.merge(statcast[ev_cols_available], on='Name', how='left')
+
+        # Drop WAR positional adjustment column (float like -3.4); add real fielding position
+        self._merged = self._merged.drop(columns=['Pos'], errors='ignore')
+        pos_map = self._fetch_position_map()
+        self._merged['Pos'] = self._merged['IDfg'].astype(int).astype(str).map(pos_map)
+
         self._fetched = True
 
     def _fetch_projections(self) -> pd.DataFrame:
@@ -223,6 +243,12 @@ class Pitchers:
         spin_cols = [c for c in spin.columns if c not in _exclude]
 
         self._merged = raw.merge(spin[spin_cols], on='Name', how='left')
+
+        # Derive pitcher role from GS/G ratio (>= 0.5 → SP, else RP)
+        self._merged['Pos'] = np.where(
+            self._merged['GS'] / self._merged['G'].clip(lower=1) >= 0.5, 'SP', 'RP'
+        )
+
         self._fetched = True
 
     def _fetch_projections(self) -> pd.DataFrame:
