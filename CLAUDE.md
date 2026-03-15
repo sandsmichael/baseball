@@ -10,6 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Always verify after completing a task — confirm the action meets the objective.
 - After every piece of user feedback, update `lessons.md` with the pattern to prevent repeat mistakes.
 - Use subagents liberally to keep the context window clean.
+- Always test and verify your work. Run notebook cells after you make changes to ensure there are no errors. 
 
 ## Project Overview
 

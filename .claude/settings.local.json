@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\({k:v for k,v in d.items\\(\\) if k not in \\(''access_token'',''refresh_token'',''consumer_secret''\\)}\\)\")",
+      "Bash(conda run -n venv python3 -c \"from yahoo_oauth import OAuth2; import inspect; print\\([a for a in dir\\(OAuth2\\) if ''token'' in a.lower\\(\\) or ''access'' in a.lower\\(\\)]\\)\")",
+      "Bash(/opt/anaconda3/envs/venv/bin/python -c \"from yahoo_oauth import OAuth2; print\\([a for a in dir\\(OAuth2\\) if ''token'' in a.lower\\(\\) or ''access'' in a.lower\\(\\)]\\)\")",
+      "Bash(/opt/anaconda3/envs/venv/bin/python -c \":*)",
+      "Bash(/opt/anaconda3/envs/venv/bin/jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=60 --inplace yahoo_fantasy_baseball.ipynb --ExecutePreprocessor.kernel_name=python3)",
+      "Bash(/opt/anaconda3/envs/venv/bin/python3 -c \":*)",
+      "Bash(conda run -n venv python -c \":*)",
+      "Bash(conda run -n venv jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=600 --ExecutePreprocessor.kernel_name=python3 notebooks/breakouts.ipynb)",
+      "Bash(conda run -n venv pip install scikit-learn)",
+      "Bash(python3:*)"
+    ]
+  }
+}

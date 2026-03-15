@@ -366,6 +366,76 @@ def _yahoo_auto_auth(
     print(f'Tokens saved to {creds_file}.')
 
 
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_path(path: str) -> str:
+    """Return path as-is if it exists, otherwise resolve relative to yahoo.py's directory."""
+    if os.path.exists(path):
+        return path
+    candidate = os.path.join(_MODULE_DIR, path)
+    if os.path.exists(candidate):
+        return candidate
+    return path  # let the caller raise the appropriate error
+
+
+def _token_is_expired(creds_file: str) -> bool:
+    """Return True if the access token has expired or will expire within a minute."""
+    try:
+        with open(creds_file) as f:
+            data = json.load(f)
+        return (time.time() - data.get('token_time', 0)) > 3540
+    except Exception:
+        return True
+
+
+def _refresh_tokens(creds_file: str) -> bool:
+    """
+    Refresh the access token using the saved refresh_token via a direct POST to Yahoo.
+
+    yahoo_oauth's built-in refresh fails with PKCE-obtained tokens, so we
+    refresh ourselves and update the file so yahoo_oauth sees a valid token.
+
+    Returns True on success, False if the refresh_token is missing or the
+    request fails.
+    """
+    if not os.path.exists(creds_file):
+        return False
+    with open(creds_file) as f:
+        data = json.load(f)
+    refresh_token = data.get('refresh_token', '')
+    consumer_key  = data.get('consumer_key', '')
+    if not refresh_token or not consumer_key:
+        return False
+
+    resp = _requests.post(
+        'https://api.login.yahoo.com/oauth2/get_token',
+        data={
+            'grant_type':    'refresh_token',
+            'refresh_token': refresh_token,
+            'client_id':     consumer_key,
+            'redirect_uri':  'https://localhost',
+        },
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        return False
+    tokens = resp.json()
+    if 'access_token' not in tokens:
+        return False
+
+    data.update({
+        'access_token':      tokens['access_token'],
+        'refresh_token':     tokens.get('refresh_token', refresh_token),
+        'token_type':        tokens.get('token_type', 'bearer'),
+        'token_expires_in':  tokens.get('expires_in', 3600),
+        'token_time':        time.time(),
+    })
+    with open(creds_file, 'w') as f:
+        json.dump(data, f, indent=2)
+    return True
+
+
 def init_auth(
     env_path: str = '.env',
     creds_file: str = 'browser/yahoo_oauth.json',
@@ -384,6 +454,8 @@ def init_auth(
     """
     logging.getLogger('yahoo_oauth').setLevel(logging.WARNING)
 
+    env_path   = _resolve_path(env_path)
+    creds_file = _resolve_path(creds_file)
     env = load_env(env_path)
     consumer_key    = env['Client_ID']
     consumer_secret = env.get('Client_Secret', '')
@@ -407,12 +479,11 @@ def init_auth(
 
     if _has_refresh_token(creds_file):
         print('Refresh token found — no browser needed.')
+        _refresh_tokens(creds_file)
     else:
         _yahoo_auto_auth(consumer_key, email, password, creds_file)
 
     oauth = OAuth2(None, None, from_file=creds_file)
-    if not oauth.token_is_valid():
-        oauth.refresh_access_token()
     print('OAuth OK — session ready')
     return creds_file
 
@@ -522,6 +593,423 @@ def top_available_all_leagues(
     )
 
 
+def all_rosters(
+    leagues_df: pd.DataFrame,
+    creds_file: str,
+    season: int = None,
+) -> pd.DataFrame:
+    """
+    Fetch your current roster for every league and return a wide DataFrame.
+
+    Columns are your team names; index is the roster slot (e.g. C, 1B, BN_1 … BN_5);
+    values are player names.  Duplicate slots (BN, OF, SP, …) are suffixed _1, _2, …
+
+    Args:
+        leagues_df: DataFrame from Yahoo.list_leagues().
+        creds_file: Path to yahoo_oauth.json.
+        season:     Season year (defaults to current calendar year).
+
+    Returns:
+        DataFrame — columns = team_name, index = slot, values = player name (NaN if empty).
+    """
+    season = season or date.today().year
+
+    oauth = OAuth2(None, None, from_file=creds_file)
+    if not oauth.token_is_valid():
+        oauth.refresh_access_token()
+
+    def _api_get(path: str) -> dict:
+        if not oauth.token_is_valid():
+            oauth.refresh_access_token()
+        resp = oauth.session.get(f'{BASE}{path}?format=json')
+        resp.raise_for_status()
+        return resp.json()
+
+    def _fetch_roster_series(team_key: str) -> pd.Series:
+        data = _api_get(f'/team/{team_key}/roster;date={date.today().isoformat()}')
+        players = data['fantasy_content']['team'][1]['roster']['0']['players']
+        rows = []
+        for i in range(players['count']):
+            p = players[str(i)]['player']
+            flat = Yahoo._flat(p[0])
+            pos_flat = Yahoo._flat(p[1].get('selected_position', []))
+            rows.append({
+                'slot': pos_flat.get('position', ''),
+                'name': Yahoo._name(flat.get('name', '')),
+            })
+        df = pd.DataFrame(rows).sort_values('slot').reset_index(drop=True)
+        slot_counts = df['slot'].value_counts()
+        counters: dict[str, int] = {}
+        labeled = []
+        for slot in df['slot']:
+            counters[slot] = counters.get(slot, 0) + 1
+            label = f'{slot}_{counters[slot]}' if slot_counts[slot] > 1 else slot
+            labeled.append(label)
+        return pd.Series(df['name'].values, index=labeled, name=None)
+
+    rosters: dict[str, pd.Series] = {}
+    for _, row in leagues_df.iterrows():
+        league_key = row['league_key']
+        team_name  = row['team_name']
+        print(f'  {row["name"]}...')
+        try:
+            data = _api_get(f'/league/{league_key}/teams')
+            teams_data = data['fantasy_content']['league'][1]['teams']
+            team_key = None
+            for i in range(teams_data['count']):
+                flat = Yahoo._flat(teams_data[str(i)]['team'][0])
+                if flat.get('is_owned_by_current_login') == 1:
+                    team_key = flat['team_key']
+                    break
+            if not team_key:
+                print(f'    Could not find your team in {row["name"]}')
+                continue
+            rosters[team_name] = _fetch_roster_series(team_key)
+        except Exception as e:
+            print(f'    Error: {e}')
+
+    if not rosters:
+        return pd.DataFrame()
+    return pd.DataFrame(rosters)
+
+
+def _fetch_fg_projections(stats_type: str, proj_system: str = 'atc') -> pd.DataFrame:
+    """
+    Fetch FanGraphs projections directly from the API without pool filtering.
+
+    stats_type:  'bat' or 'pit'
+    proj_system: FanGraphs projection system key (e.g. 'atc', 'steamerr', 'zips')
+    Returns a DataFrame with a 'Name' column and stat columns, or empty DataFrame on error.
+    """
+    url = (
+        f'https://www.fangraphs.com/api/projections'
+        f'?stats={stats_type}&type={proj_system}&pos=all&teamid=0&players=0'
+    )
+    try:
+        resp = _requests.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        if 'PlayerName' in df.columns and 'Name' not in df.columns:
+            df = df.rename(columns={'PlayerName': 'Name'})
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _proj_roto_scores(season: int, proj_system: str = 'steamerr') -> pd.DataFrame:
+    """
+    Compute roto z-scores from FanGraphs projections fetched directly via API.
+
+    Mirrors Fantasy._rank_categories() logic but without needing batting_stats,
+    so it works pre-season when the FanGraphs leaderboard has no data yet.
+
+    Args:
+        season:      Season year.
+        proj_system: FanGraphs projection system (e.g. 'steamerr', 'atc', 'zips').
+
+    Returns DataFrame with columns: _norm, Name, player_type, fantasy_score
+    """
+    norm = Yahoo._norm_name
+
+    def _zscore(s: pd.Series) -> pd.Series:
+        std = s.std()
+        return (s - s.mean()) / std if std and not pd.isna(std) else pd.Series(0.0, index=s.index)
+
+    rows = []
+
+    # Batting: R, HR, RBI, SB, AVG (all higher-is-better)
+    bat = _fetch_fg_projections('bat', proj_system)
+    bat_cats = ['R', 'HR', 'RBI', 'SB', 'AVG']
+    if 'Name' in bat.columns and any(c in bat.columns for c in bat_cats):
+        b = bat[['Name'] + [c for c in bat_cats if c in bat.columns]].dropna(subset=['Name']).copy()
+        z_cols = []
+        for cat in bat_cats:
+            if cat not in b.columns:
+                continue
+            if cat == 'AVG' and 'AB' in bat.columns:
+                b = b.join(bat[['AB']].loc[b.index], rsuffix='_ab')
+                pool_mean = b['AVG'].mean()
+                b['z_AVG'] = _zscore((b['AVG'] - pool_mean) * b.get('AB', 1))
+            else:
+                b[f'z_{cat}'] = _zscore(b[cat].fillna(0))
+            z_cols.append(f'z_{cat}')
+        if z_cols:
+            b['fantasy_score'] = b[z_cols].sum(axis=1)
+            b['_norm'] = b['Name'].map(norm)
+            b['player_type'] = 'batter'
+            rows.append(b[['_norm', 'Name', 'player_type', 'fantasy_score']])
+
+    # Pitching: W, SV, SO (higher-is-better), ERA, WHIP (lower-is-better → negate)
+    pit = _fetch_fg_projections('pit', proj_system)
+    pit_cats_pos = ['W', 'SV', 'SO']
+    pit_cats_neg = ['ERA', 'WHIP']
+    if 'Name' in pit.columns and any(c in pit.columns for c in pit_cats_pos + pit_cats_neg):
+        p = pit[['Name'] + [c for c in pit_cats_pos + pit_cats_neg if c in pit.columns]].dropna(subset=['Name']).copy()
+        z_cols = []
+        for cat in pit_cats_pos:
+            if cat in p.columns:
+                p[f'z_{cat}'] = _zscore(p[cat].fillna(0))
+                z_cols.append(f'z_{cat}')
+        for cat in pit_cats_neg:
+            if cat in p.columns:
+                # Negate: lower ERA/WHIP → higher z-score
+                if cat == 'ERA' and 'IP' in pit.columns:
+                    p = p.join(pit[['IP']].loc[p.index], rsuffix='_ip')
+                    pool_mean = p[cat].mean()
+                    p[f'z_{cat}'] = -_zscore((p[cat] - pool_mean) * p.get('IP', 1))
+                else:
+                    p[f'z_{cat}'] = -_zscore(p[cat].fillna(p[cat].mean()))
+                z_cols.append(f'z_{cat}')
+        if z_cols:
+            p['fantasy_score'] = p[z_cols].sum(axis=1)
+            p['_norm'] = p['Name'].map(norm)
+            p['player_type'] = 'pitcher'
+            rows.append(p[['_norm', 'Name', 'player_type', 'fantasy_score']])
+
+    if not rows:
+        return pd.DataFrame(columns=['_norm', 'Name', 'player_type', 'fantasy_score'])
+    return pd.concat(rows, ignore_index=True)
+
+
+def top_available_with_stats(
+    leagues_df: pd.DataFrame,
+    creds_file: str,
+    season: int = None,
+    n: int = 5,
+) -> pd.DataFrame:
+    """
+    Top N available players per league enriched with current season stats and ATC projections.
+
+    ATC projections are fetched directly from the FanGraphs API (no pool filtering),
+    so this works pre-season when the batting/pitching leaderboards have no data yet.
+    Current season stats are included when available, and silently omitted otherwise.
+
+    Args:
+        leagues_df: DataFrame from Yahoo.list_leagues().
+        creds_file: Path to yahoo_oauth.json.
+        season:     Season year (defaults to current calendar year).
+        n:          Number of top batters + pitchers to return per league.
+
+    Returns:
+        DataFrame with all top_available_all_leagues columns plus:
+            current stat columns (PA/HR/RBI/R/SB/AVG for batters; IP/W/SV/SO/ERA/WHIP for pitchers)
+            proj_* columns for the same stats using ATC projections.
+    """
+    season = season or date.today().year
+
+    avail = top_available_all_leagues(leagues_df, creds_file, season, n=n)
+    if avail.empty:
+        return avail
+
+    norm = Yahoo._norm_name
+    avail = avail.copy()
+    avail['_norm'] = avail['name'].map(norm)
+
+    # ATC projections — fetched directly, works pre-season
+    bat_proj = _fetch_fg_projections('bat')
+    pit_proj = _fetch_fg_projections('pit')
+
+    if 'Name' in bat_proj.columns:
+        bat_proj['_norm'] = bat_proj['Name'].map(norm)
+    if 'Name' in pit_proj.columns:
+        pit_proj['_norm'] = pit_proj['Name'].map(norm)
+
+    # Current season stats — may fail early in season; degrade gracefully
+    bat_curr = pd.DataFrame()
+    pit_curr = pd.DataFrame()
+    try:
+        from baseball import Batters, Pitchers
+        bat_curr = Batters(season).fetch().all
+        if 'Name' in bat_curr.columns:
+            bat_curr['_norm'] = bat_curr['Name'].map(norm)
+        pit_curr = Pitchers(season).fetch().all
+        if 'Name' in pit_curr.columns:
+            pit_curr['_norm'] = pit_curr['Name'].map(norm)
+    except Exception:
+        pass  # season not started — current stats unavailable
+
+    _BAT_STATS = [c for c in ['PA', 'HR', 'RBI', 'R', 'SB', 'AVG'] if c in bat_curr.columns]
+    _PIT_STATS = [c for c in ['IP', 'W', 'SV', 'SO', 'ERA', 'WHIP'] if c in pit_curr.columns]
+    _BAT_PROJ  = [c for c in ['PA', 'HR', 'R', 'RBI', 'SB', 'AVG'] if c in bat_proj.columns]
+    _PIT_PROJ  = [c for c in ['IP', 'W', 'SV', 'SO', 'ERA', 'WHIP'] if c in pit_proj.columns]
+
+    bat_avail = avail[avail['type'] == 'batter'].copy()
+    pit_avail = avail[avail['type'] == 'pitcher'].copy()
+
+    if '_norm' in bat_curr.columns and _BAT_STATS:
+        bat_curr_sel = bat_curr[['_norm'] + _BAT_STATS].drop_duplicates('_norm')
+        bat_avail = bat_avail.merge(bat_curr_sel, on='_norm', how='left')
+
+    if '_norm' in pit_curr.columns and _PIT_STATS:
+        pit_curr_sel = pit_curr[['_norm'] + _PIT_STATS].drop_duplicates('_norm')
+        pit_avail = pit_avail.merge(pit_curr_sel, on='_norm', how='left')
+
+    if '_norm' in bat_proj.columns and _BAT_PROJ:
+        bat_proj_sel = (bat_proj[['_norm'] + _BAT_PROJ].drop_duplicates('_norm')
+                        .rename(columns={c: f'proj_{c}' for c in _BAT_PROJ}))
+        bat_avail = bat_avail.merge(bat_proj_sel, on='_norm', how='left')
+
+    if '_norm' in pit_proj.columns and _PIT_PROJ:
+        pit_proj_sel = (pit_proj[['_norm'] + _PIT_PROJ].drop_duplicates('_norm')
+                        .rename(columns={c: f'proj_{c}' for c in _PIT_PROJ}))
+        pit_avail = pit_avail.merge(pit_proj_sel, on='_norm', how='left')
+
+    return pd.concat([bat_avail, pit_avail], ignore_index=True).drop(columns='_norm')
+
+
+def upgrade_candidates(
+    leagues_df: pd.DataFrame,
+    creds_file: str,
+    season: int = None,
+    n: int = 5,
+    proj_system: str = 'steamerr',
+) -> pd.DataFrame:
+    """
+    Identify available players who outperform your current roster players.
+
+    Compares top N available players per league against your rostered players using
+    roto fantasy z-scores (current season) and projected roto scores.  Returns
+    pairs where the available player has a higher current OR projected score than a
+    rostered player of the same type.
+
+    Args:
+        leagues_df:  DataFrame from Yahoo.list_leagues().
+        creds_file:  Path to yahoo_oauth.json.
+        season:      Season year (defaults to current calendar year).
+        n:           Number of top available players per league to analyze.
+        proj_system: FanGraphs projection system for comparison scores.
+                     Defaults to 'steamerr' (Steamer rest-of-season), which is
+                     best mid-season. Other options: 'atc', 'zips', 'thebat', etc.
+
+    Returns:
+        DataFrame sorted by curr_improvement descending with columns:
+            league, my_team, available, avail_curr_score, avail_proj_score, avail_pct_owned,
+            rostered, rostered_curr_score, rostered_proj_score, rostered_slot,
+            curr_improvement, proj_improvement
+    """
+    season = season or date.today().year
+
+    _PITCHER_RE = re.compile(r'\b(SP|RP|P)\b')
+    _IL_SLOTS   = {'IL', 'IL+', 'NA', 'IR', 'DL'}
+
+    def _player_type(positions: str) -> str:
+        return 'pitcher' if _PITCHER_RE.search(str(positions)) else 'batter'
+
+    # Top available with stats
+    avail = top_available_with_stats(leagues_df, creds_file, season, n=n)
+    if avail.empty:
+        return pd.DataFrame()
+
+    # Roto fantasy scores — current season (may fail pre-season; fall back to empty)
+    curr_scores = pd.DataFrame(columns=['_norm', 'fantasy_score'])
+    try:
+        from baseball import Fantasy
+        curr_scores = (
+            Fantasy(season, 'roto').fetch()
+            .rank(min_pa=1, min_ip=1)[['Name', 'fantasy_score']]
+            .copy()
+        )
+        curr_scores['_norm'] = curr_scores['Name'].map(Yahoo._norm_name)
+    except Exception:
+        pass  # season not started — current scores unavailable
+
+    # Projected roto scores — direct API, works pre-season
+    # Fall back to 'atc' if the requested system isn't published yet (e.g. 'steamerr' pre-season)
+    proj_scores = _proj_roto_scores(season, proj_system=proj_system)
+    if proj_scores.empty and proj_system != 'atc':
+        print(f'  {proj_system!r} projections unavailable; falling back to atc.')
+        proj_scores = _proj_roto_scores(season, proj_system='atc')
+
+    # Attach scores to available players
+    avail = avail.copy()
+    avail['_norm'] = avail['name'].map(Yahoo._norm_name)
+    avail = (
+        avail
+        .merge(curr_scores[['_norm', 'fantasy_score']].rename(columns={'fantasy_score': 'avail_curr_score'}),
+               on='_norm', how='left')
+        .merge(proj_scores[['_norm', 'fantasy_score']].rename(columns={'fantasy_score': 'avail_proj_score'}),
+               on='_norm', how='left')
+    )
+
+    # Collect my rosters across all leagues (long format, excluding IL slots)
+    roster_rows = []
+    for _, row in leagues_df.iterrows():
+        try:
+            yf = Yahoo(row['league_id'], season=season, creds_file=creds_file).fetch()
+            for _, p in yf.roster.iterrows():
+                if p['slot'] in _IL_SLOTS:
+                    continue
+                roster_rows.append({
+                    'league':      row['name'],
+                    'my_team':     row['team_name'],
+                    'name':        p['name'],
+                    'positions':   p['positions'],
+                    'slot':        p['slot'],
+                    '_norm':       Yahoo._norm_name(p['name']),
+                    'player_type': _player_type(p['positions']),
+                })
+        except Exception as e:
+            print(f'  Roster error ({row["name"]}): {e}')
+
+    if not roster_rows:
+        return pd.DataFrame()
+
+    rosters = (
+        pd.DataFrame(roster_rows)
+        .merge(curr_scores[['_norm', 'fantasy_score']].rename(columns={'fantasy_score': 'curr_score'}),
+               on='_norm', how='left')
+        .merge(proj_scores[['_norm', 'fantasy_score']].rename(columns={'fantasy_score': 'proj_score'}),
+               on='_norm', how='left')
+    )
+
+    # Build upgrade pairs
+    upgrade_rows = []
+    for _, av in avail.iterrows():
+        avail_curr = av.get('avail_curr_score')
+        avail_proj = av.get('avail_proj_score')
+        if pd.isna(avail_curr) and pd.isna(avail_proj):
+            continue
+
+        league_roster = rosters[
+            (rosters['league'] == av['league']) &
+            (rosters['player_type'] == av['type'])
+        ]
+
+        for _, rp in league_roster.iterrows():
+            curr_better = (not pd.isna(avail_curr)) and (pd.isna(rp['curr_score']) or avail_curr > rp['curr_score'])
+            proj_better = (not pd.isna(avail_proj)) and (pd.isna(rp['proj_score']) or avail_proj > rp['proj_score'])
+            if not (curr_better or proj_better):
+                continue
+            upgrade_rows.append({
+                'league':               av['league'],
+                'my_team':              av['my_team'],
+                'available':            av['name'],
+                'avail_curr_score':     avail_curr,
+                'avail_proj_score':     avail_proj,
+                'avail_pct_owned':      av['pct_owned'],
+                'rostered':             rp['name'],
+                'rostered_curr_score':  rp['curr_score'],
+                'rostered_proj_score':  rp['proj_score'],
+                'rostered_slot':        rp['slot'],
+                'curr_improvement': (avail_curr - rp['curr_score'])
+                    if (not pd.isna(avail_curr) and not pd.isna(rp['curr_score'])) else None,
+                'proj_improvement': (avail_proj - rp['proj_score'])
+                    if (not pd.isna(avail_proj) and not pd.isna(rp['proj_score'])) else None,
+            })
+
+    if not upgrade_rows:
+        return pd.DataFrame()
+
+    return (
+        pd.DataFrame(upgrade_rows)
+        .sort_values(['curr_improvement', 'proj_improvement'], ascending=False, na_position='last')
+        .reset_index(drop=True)
+    )
+
+
 class Yahoo:
     """
     Yahoo Fantasy Baseball client.
@@ -541,6 +1029,17 @@ class Yahoo:
     ):
         self.league_id = str(league_id) if league_id is not None else None
         self.season = season or date.today().year
+        self._creds_file = creds_file
+        # Refresh using the PKCE-compatible path before yahoo_oauth's __init__ runs.
+        # yahoo_oauth auto-refreshes expired tokens via Basic Auth (consumer_key:secret),
+        # but PKCE-obtained tokens must be refreshed with just client_id — no secret.
+        # Pre-refreshing here ensures yahoo_oauth sees a valid token and skips its path.
+        if _token_is_expired(creds_file):
+            if not _refresh_tokens(creds_file):
+                raise RuntimeError(
+                    'Yahoo access token is expired and the refresh token is invalid. '
+                    'Re-run init_auth() to obtain new tokens via browser.'
+                )
         self._oauth = OAuth2(None, None, from_file=creds_file)
         self._game_key: str | None = None
         self._league_key: str | None = None
@@ -577,7 +1076,12 @@ class Yahoo:
 
     def _refresh(self):
         if not self._oauth.token_is_valid():
-            self._oauth.refresh_access_token()
+            if not _refresh_tokens(self._creds_file):
+                raise RuntimeError(
+                    'Yahoo refresh token is expired or invalid. '
+                    'Re-run init_auth() to obtain new tokens via browser.'
+                )
+            self._oauth = OAuth2(None, None, from_file=self._creds_file)
 
     # ── Playwright browser helpers (write operations) ─────────────────────────
 
