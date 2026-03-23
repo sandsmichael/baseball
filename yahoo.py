@@ -673,6 +673,191 @@ def all_rosters(
     return pd.DataFrame(rosters)
 
 
+def il_candidates(
+    leagues_df: pd.DataFrame,
+    creds_file: str,
+    season: int = None,
+) -> pd.DataFrame:
+    """
+    Scan all leagues and return players who are on the IL/DL in real life
+    but are NOT currently placed in an IL slot on your fantasy roster.
+
+    These are roster inefficiencies — players taking up active or bench slots
+    who could be moved to IL, freeing a slot for a healthy player.
+
+    Args:
+        leagues_df: DataFrame from Yahoo.list_leagues().
+        creds_file: Path to yahoo_oauth.json.
+        season:     Season year (defaults to current calendar year).
+
+    Returns:
+        DataFrame with columns:
+            league, my_team, name, mlb_team, positions, status, slot, player_key
+        Sorted by league then player name.
+    """
+    # Yahoo status values that indicate a player is on the injured list
+    _IL_STATUSES = {'IL', 'IL10', 'IL15', 'IL60', 'DL', 'DL15', 'DL60'}
+    # Fantasy slots that are designated for injured players
+    _IL_SLOTS    = {'IL', 'IL+', 'IL60', 'DL'}
+
+    season = season or date.today().year
+
+    oauth = OAuth2(None, None, from_file=creds_file)
+    if not oauth.token_is_valid():
+        oauth.refresh_access_token()
+
+    def _api_get(path: str) -> dict:
+        if not oauth.token_is_valid():
+            oauth.refresh_access_token()
+        resp = oauth.session.get(f'{BASE}{path}?format=json')
+        resp.raise_for_status()
+        return resp.json()
+
+    rows = []
+    for _, row in leagues_df.iterrows():
+        league_key  = row['league_key']
+        league_name = row['name']
+        team_name   = row['team_name']
+        print(f'  {league_name}...')
+        try:
+            # Find my team key in this league
+            data = _api_get(f'/league/{league_key}/teams')
+            teams_data = data['fantasy_content']['league'][1]['teams']
+            team_key = None
+            for i in range(teams_data['count']):
+                flat = Yahoo._flat(teams_data[str(i)]['team'][0])
+                if flat.get('is_owned_by_current_login') == 1:
+                    team_key = flat['team_key']
+                    break
+            if not team_key:
+                print(f'    Could not find your team in {league_name}')
+                continue
+
+            # Fetch roster
+            data = _api_get(f'/team/{team_key}/roster;date={date.today().isoformat()}')
+            players = data['fantasy_content']['team'][1]['roster']['0']['players']
+            for i in range(players['count']):
+                p = players[str(i)]['player']
+                flat     = Yahoo._flat(p[0])
+                pos_flat = Yahoo._flat(p[1].get('selected_position', []))
+                status   = flat.get('status', '') or ''
+                slot     = pos_flat.get('position', '')
+                if status in _IL_STATUSES and slot not in _IL_SLOTS:
+                    rows.append({
+                        'league':     league_name,
+                        'my_team':    team_name,
+                        'name':       Yahoo._name(flat.get('name', '')),
+                        'mlb_team':   flat.get('editorial_team_abbr', ''),
+                        'positions':  flat.get('display_position', ''),
+                        'status':     status,
+                        'slot':       slot,
+                        'player_key': flat.get('player_key', ''),
+                    })
+        except Exception as e:
+            print(f'    Error ({league_name}): {e}')
+
+    if not rows:
+        return pd.DataFrame(
+            columns=['league', 'my_team', 'name', 'mlb_team', 'positions', 'status', 'slot', 'player_key']
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values(['league', 'name'])
+        .reset_index(drop=True)
+        [['league', 'my_team', 'name', 'mlb_team', 'positions', 'status', 'slot', 'player_key']]
+    )
+
+
+def dtd_candidates(
+    leagues_df: pd.DataFrame,
+    creds_file: str,
+    season: int = None,
+) -> pd.DataFrame:
+    """
+    Scan all leagues and return players who are Day-To-Day (DTD) but are
+    currently in an active roster slot (not Bench).
+
+    These players are starting while hurt — consider benching them until
+    they are confirmed to play.
+
+    Args:
+        leagues_df: DataFrame from Yahoo.list_leagues().
+        creds_file: Path to yahoo_oauth.json.
+        season:     Season year (defaults to current calendar year).
+
+    Returns:
+        DataFrame with columns:
+            league, my_team, name, mlb_team, positions, status, slot, player_key
+        Sorted by league then player name.
+    """
+    _BENCH_LIKE = {'BN', 'IL', 'IL+', 'IL60', 'DL', 'NA', 'IR'}
+
+    season = season or date.today().year
+
+    oauth = OAuth2(None, None, from_file=creds_file)
+    if not oauth.token_is_valid():
+        oauth.refresh_access_token()
+
+    def _api_get(path: str) -> dict:
+        if not oauth.token_is_valid():
+            oauth.refresh_access_token()
+        resp = oauth.session.get(f'{BASE}{path}?format=json')
+        resp.raise_for_status()
+        return resp.json()
+
+    rows = []
+    for _, row in leagues_df.iterrows():
+        league_key  = row['league_key']
+        league_name = row['name']
+        team_name   = row['team_name']
+        print(f'  {league_name}...')
+        try:
+            data = _api_get(f'/league/{league_key}/teams')
+            teams_data = data['fantasy_content']['league'][1]['teams']
+            team_key = None
+            for i in range(teams_data['count']):
+                flat = Yahoo._flat(teams_data[str(i)]['team'][0])
+                if flat.get('is_owned_by_current_login') == 1:
+                    team_key = flat['team_key']
+                    break
+            if not team_key:
+                print(f'    Could not find your team in {league_name}')
+                continue
+
+            data = _api_get(f'/team/{team_key}/roster;date={date.today().isoformat()}')
+            players = data['fantasy_content']['team'][1]['roster']['0']['players']
+            for i in range(players['count']):
+                p = players[str(i)]['player']
+                flat     = Yahoo._flat(p[0])
+                pos_flat = Yahoo._flat(p[1].get('selected_position', []))
+                status   = flat.get('status', '') or ''
+                slot     = pos_flat.get('position', '')
+                if status == 'DTD' and slot not in _BENCH_LIKE:
+                    rows.append({
+                        'league':     league_name,
+                        'my_team':    team_name,
+                        'name':       Yahoo._name(flat.get('name', '')),
+                        'mlb_team':   flat.get('editorial_team_abbr', ''),
+                        'positions':  flat.get('display_position', ''),
+                        'status':     status,
+                        'slot':       slot,
+                        'player_key': flat.get('player_key', ''),
+                    })
+        except Exception as e:
+            print(f'    Error ({league_name}): {e}')
+
+    if not rows:
+        return pd.DataFrame(
+            columns=['league', 'my_team', 'name', 'mlb_team', 'positions', 'status', 'slot', 'player_key']
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values(['league', 'name'])
+        .reset_index(drop=True)
+        [['league', 'my_team', 'name', 'mlb_team', 'positions', 'status', 'slot', 'player_key']]
+    )
+
+
 def _fetch_fg_projections(stats_type: str, proj_system: str = 'atc') -> pd.DataFrame:
     """
     Fetch FanGraphs projections directly from the API without pool filtering.
@@ -1003,11 +1188,17 @@ def upgrade_candidates(
     if not upgrade_rows:
         return pd.DataFrame()
 
-    return (
-        pd.DataFrame(upgrade_rows)
+    df = pd.DataFrame(upgrade_rows)
+
+    # Keep only the best drop candidate per (league, available player):
+    # sort by improvement descending so the best pair floats to top, then dedupe.
+    df = (
+        df
         .sort_values(['curr_improvement', 'proj_improvement'], ascending=False, na_position='last')
+        .drop_duplicates(subset=['league', 'available'], keep='first')
         .reset_index(drop=True)
     )
+    return df
 
 
 class Yahoo:
