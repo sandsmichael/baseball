@@ -253,7 +253,7 @@ export default function MatchupsPage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <NavBar />
-      <main className="max-w-screen-xl mx-auto px-4 py-6">
+      <main className="w-[95%] mx-auto py-6">
         <div className="flex items-center justify-between mb-5">
           <div>
             <h1 className="text-xl font-bold text-gray-900">Matchup Scores</h1>
