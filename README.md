@@ -25,6 +25,18 @@ Current-week stat-by-stat breakdown across every league at a glance. Green = win
 
 ![Matchups](docs/screenshots/matchups.png)
 
+### Roster Alerts
+
+Automatically flags actionable roster issues across all leagues: empty slots, probable starters sitting on bench, healthy players wasting IL slots, day-to-day players in active slots, and IL candidates.
+
+![Alerts](docs/screenshots/alerts.png)
+
+### Top Available Players
+
+Top waiver wire targets ranked by ownership %, filtered to 45%+ owned players. Toggle between basic and full season stats view.
+
+![Top Available](docs/screenshots/top_available.png)
+
 ### League Management
 
 Per-league tabbed view: **Lineup** (slot management), **Matchup** (head-to-head stats), **Standings**, and **Waivers** (free agents + projections).
