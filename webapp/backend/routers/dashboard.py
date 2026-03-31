@@ -25,6 +25,7 @@ from yahoo import (
     il_overflow,
     benched_starters,
     all_matchup_scores,
+    lineup_scratches,
 )
 
 from ..config import CREDS_FILE, SEASON, DEFAULT_PROJ_SYSTEM
@@ -240,6 +241,23 @@ def get_benched_starters(refresh: bool = Query(False)):
     try:
         leagues_df = _get_leagues_df()
         df = benched_starters(leagues_df, CREDS_FILE, SEASON)
+        records = df_to_records(df)
+        cache.set(key, records)
+        return {'candidates': records, 'cached_age': cache.age(key)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={'error': str(e)})
+
+
+@router.get('/dashboard/lineup-scratches')
+def get_lineup_scratches(refresh: bool = Query(False)):
+    key = 'lineup_scratches'
+    if not refresh:
+        cached = cache.get(key, TTL_DTD)
+        if cached is not None:
+            return {'candidates': cached, 'cached_age': cache.age(key)}
+    try:
+        leagues_df = _get_leagues_df()
+        df = lineup_scratches(leagues_df, CREDS_FILE, SEASON)
         records = df_to_records(df)
         cache.set(key, records)
         return {'candidates': records, 'cached_age': cache.age(key)}

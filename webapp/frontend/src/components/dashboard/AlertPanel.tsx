@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { dashboardApi } from '../../api/dashboard'
-import type { EmptySlot, BenchedStarter } from '../../api/dashboard'
+import type { EmptySlot, BenchedStarter, LineupScratch } from '../../api/dashboard'
 import StatusBadge from '../ui/StatusBadge'
 import SlotChip from '../ui/SlotChip'
 import CacheAge from '../ui/CacheAge'
@@ -64,13 +64,19 @@ export default function AlertPanel() {
     queryFn: () => dashboardApi.getBenchedStarters(),
     staleTime: 120_000,
   })
+  const lineupScratches = useQuery({
+    queryKey: ['lineup-scratches'],
+    queryFn: () => dashboardApi.getLineupScratches(),
+    staleTime: 120_000,
+  })
 
   const ilCount = il.data?.candidates.length ?? 0
   const dtdCount = dtd.data?.candidates.length ?? 0
   const emptyCount = emptySlots.data?.empty_slots.length ?? 0
   const overflowCount = ilOverflow.data?.candidates.length ?? 0
   const benchedCount = benchedStarters.data?.candidates.length ?? 0
-  const totalAlerts = ilCount + dtdCount + emptyCount + overflowCount + benchedCount
+  const scratchCount = lineupScratches.data?.candidates.length ?? 0
+  const totalAlerts = ilCount + dtdCount + emptyCount + overflowCount + benchedCount + scratchCount
 
   return (
     <div className="card p-4">
@@ -130,6 +136,46 @@ export default function AlertPanel() {
                       Manage →
                     </Link>
                   </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Lineup Scratches — batters in active slots confirmed not starting */}
+      <div className="mb-5">
+        <h3 className="text-sm font-semibold text-red-700 mb-2 flex items-center gap-1.5">
+          Batters Not in Today's Lineup
+          {scratchCount > 0 && <span className="badge bg-red-100 text-red-700">{scratchCount}</span>}
+        </h3>
+        {lineupScratches.isLoading ? (
+          <div className="flex items-center gap-2 text-sm text-gray-500"><Spinner size="sm" /> Loading...</div>
+        ) : lineupScratches.isError ? (
+          <p className="text-sm text-red-500">Error: {String(lineupScratches.error)}</p>
+        ) : (lineupScratches.data?.candidates ?? []).length === 0 ? (
+          <p className="text-sm text-gray-500 py-2">All active batters are in today's lineup.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b text-xs text-gray-500">
+                <th className="text-left py-1.5 font-medium">Player</th>
+                <th className="text-left py-1.5 font-medium">MLB</th>
+                <th className="text-left py-1.5 font-medium">Pos</th>
+                <th className="text-left py-1.5 font-medium">Slot</th>
+                <th className="text-left py-1.5 font-medium">League</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(lineupScratches.data?.candidates ?? []).map((s: LineupScratch, i: number) => (
+                <tr key={i} className="table-row-hover border-b last:border-0">
+                  <td className="py-1.5 font-medium flex items-center gap-1.5">
+                    <span className="text-red-500">✕</span> {s.name}
+                  </td>
+                  <td className="py-1.5 text-gray-600">{s.mlb_team}</td>
+                  <td className="py-1.5 text-gray-600 text-xs">{s.positions}</td>
+                  <td className="py-1.5"><SlotChip slot={s.slot} /></td>
+                  <td className="py-1.5 text-xs text-gray-500 max-w-[140px] truncate">{s.my_team}</td>
                 </tr>
               ))}
             </tbody>

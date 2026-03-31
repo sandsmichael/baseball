@@ -62,6 +62,11 @@ export const dashboardApi = {
     api.get<{ matchups: MatchupScore[]; cached_age: number | null }>(
       `/dashboard/matchup-scores${refresh ? '?refresh=true' : ''}`
     ),
+
+  getLineupScratches: (refresh = false) =>
+    api.get<{ candidates: LineupScratch[]; cached_age: number | null }>(
+      `/dashboard/lineup-scratches${refresh ? '?refresh=true' : ''}`
+    ),
 }
 
 export interface MatchupStat {
@@ -98,6 +103,16 @@ export interface BenchedStarter {
   slot: string
   player_key: string
   probable: boolean
+}
+
+export interface LineupScratch {
+  league: string
+  my_team: string
+  name: string
+  mlb_team: string
+  positions: string
+  slot: string
+  player_key: string
 }
 
 export interface EmptySlot {

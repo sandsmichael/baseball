@@ -1326,6 +1326,116 @@ def benched_starters(
     )
 
 
+def lineup_scratches(
+    leagues_df: pd.DataFrame,
+    creds_file: str,
+    season: int = None,
+) -> pd.DataFrame:
+    """
+    Find batters in active (non-bench) fantasy slots who are confirmed NOT
+    in today's MLB lineup (Yahoo red X / is_starting == 0).
+
+    Uses the roster endpoint with out=starting_status to get Yahoo's
+    lineup confirmation data for each player.
+
+    Returns:
+        DataFrame with columns:
+            league, my_team, name, mlb_team, positions, slot, player_key
+    """
+    _PITCHER_POS = {'SP', 'RP', 'P'}
+    _BENCH_LIKE  = {'BN', 'IL', 'IL+', 'IL10', 'IL15', 'IL60', 'DL', 'DL15', 'DL60', 'NA', 'NA+', 'IR'}
+
+    today_str = date.today().isoformat()
+    season = season or date.today().year
+
+    if _token_is_expired(creds_file):
+        _refresh_tokens(creds_file)
+    oauth = OAuth2(None, None, from_file=creds_file)
+
+    def _api_get(path: str) -> dict:
+        nonlocal oauth
+        if _token_is_expired(creds_file):
+            _refresh_tokens(creds_file)
+            oauth = OAuth2(None, None, from_file=creds_file)
+        resp = oauth.session.get(f'{BASE}{path}?format=json')
+        resp.raise_for_status()
+        return resp.json()
+
+    rows = []
+    for _, lrow in leagues_df.iterrows():
+        league_name = lrow['name']
+        league_key  = lrow['league_key']
+
+        try:
+            teams_data = _api_get(f'/league/{league_key}/teams')['fantasy_content']['league'][1]['teams']
+            team_key   = None
+            team_name  = lrow.get('team_name', '')
+            for i in range(teams_data['count']):
+                flat = Yahoo._flat(teams_data[str(i)]['team'][0])
+                if flat.get('is_owned_by_current_login') == 1:
+                    team_key = flat['team_key']
+                    break
+            if not team_key:
+                continue
+
+            data    = _api_get(f'/team/{team_key}/roster;date={today_str};out=starting_status')
+            players = data['fantasy_content']['team'][1]['roster']['0']['players']
+
+            for i in range(players['count']):
+                p        = players[str(i)]['player']
+                flat     = Yahoo._flat(p[0])
+                pos_flat = Yahoo._flat(p[1].get('selected_position', []))
+                slot     = pos_flat.get('position', '')
+
+                # Only active (non-bench) slots
+                if slot in _BENCH_LIKE:
+                    continue
+
+                positions = flat.get('display_position', '')
+                pos_set   = {pp.strip() for pp in positions.split(',')}
+
+                # Only batters (skip pure pitchers)
+                if pos_set.issubset(_PITCHER_POS):
+                    continue
+
+                # Check starting_status from sub-resources
+                ss_raw = p[1].get('starting_status', {})
+                if isinstance(ss_raw, list):
+                    ss = Yahoo._flat(ss_raw)
+                else:
+                    ss = ss_raw or {}
+
+                is_starting = ss.get('is_starting')
+                # is_starting == 0  → red X (confirmed NOT starting)
+                # is_starting == 1  → green check (confirmed starting)
+                # missing / null    → unknown (no game yet, or not yet set)
+                if str(is_starting) != '0':
+                    continue
+
+                rows.append({
+                    'league':     league_name,
+                    'my_team':    team_name,
+                    'name':       Yahoo._name(flat.get('name', '')),
+                    'mlb_team':   flat.get('editorial_team_abbr', ''),
+                    'positions':  positions,
+                    'slot':       slot,
+                    'player_key': flat.get('player_key', ''),
+                })
+        except Exception as e:
+            print(f'  lineup-scratches error ({league_name}): {e}')
+
+    cols = ['league', 'my_team', 'name', 'mlb_team', 'positions', 'slot', 'player_key']
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return (
+        pd.DataFrame(rows)
+        .drop_duplicates(subset=['league', 'name'])
+        .sort_values(['league', 'name'])
+        .reset_index(drop=True)
+        [cols]
+    )
+
+
 def _fetch_fg_projections(stats_type: str, proj_system: str = 'atc') -> pd.DataFrame:
     """
     Fetch FanGraphs projections directly from the API without pool filtering.
