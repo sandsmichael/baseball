@@ -1,8 +1,7 @@
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { dashboardApi } from '../../api/dashboard'
-import type { EmptySlot, BenchedStarter, LineupScratch, AutoStartResult } from '../../api/dashboard'
+import type { EmptySlot, BenchedStarter, LineupScratch } from '../../api/dashboard'
 import StatusBadge from '../ui/StatusBadge'
 import SlotChip from '../ui/SlotChip'
 import CacheAge from '../ui/CacheAge'
@@ -36,77 +35,6 @@ function CandidateTable({ rows, emptyMsg }: { rows: ILCandidate[]; emptyMsg: str
         ))}
       </tbody>
     </table>
-  )
-}
-
-function AutoStartButton() {
-  const [running, setRunning] = useState(false)
-  const [results, setResults] = useState<AutoStartResult[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  async function handleClick() {
-    setRunning(true)
-    setResults(null)
-    setError(null)
-    try {
-      const data = await dashboardApi.autoStartPitchers(6)
-      setResults(data.results)
-    } catch (e: any) {
-      setError(e?.message ?? 'Unknown error')
-    } finally {
-      setRunning(false)
-    }
-  }
-
-  const swaps = results?.filter(r => r.status === 'ok') ?? []
-  const errors = results?.filter(r => r.status === 'error' && r.from_bench) ?? []
-
-  return (
-    <div className="mb-5 border border-blue-100 rounded-lg p-3 bg-blue-50">
-      <div className="flex items-center justify-between mb-2">
-        <div>
-          <h3 className="text-sm font-semibold text-blue-800">Auto-Start Pitchers</h3>
-          <p className="text-xs text-blue-600">Optimise SP slots for the next 6 days across all leagues</p>
-        </div>
-        <button
-          onClick={handleClick}
-          disabled={running}
-          className="px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {running ? <><Spinner size="sm" /> Running...</> : '⚾ Auto-Start SPs'}
-        </button>
-      </div>
-
-      {error && (
-        <p className="text-xs text-red-600 mt-1">Error: {error}</p>
-      )}
-
-      {results !== null && (
-        <div className="mt-2 text-xs space-y-0.5">
-          {swaps.length === 0 && errors.length === 0 && (
-            <p className="text-blue-700">No SP swaps needed — lineups already optimal.</p>
-          )}
-          {swaps.map((r, i) => (
-            <div key={i} className="flex items-center gap-1.5 text-green-700">
-              <span className="text-green-500">✓</span>
-              <span className="font-medium">{r.league}</span>
-              <span className="text-gray-400">[{r.date}]</span>
-              <span>{r.from_bench} → SP</span>
-              <span className="text-gray-400">·</span>
-              <span>{r.to_bench} → BN</span>
-            </div>
-          ))}
-          {errors.map((r, i) => (
-            <div key={i} className="flex items-center gap-1.5 text-red-600">
-              <span>✕</span>
-              <span className="font-medium">{r.league}</span>
-              <span className="text-gray-400">[{r.date}]</span>
-              <span>{r.from_bench} ↔ {r.to_bench}: {r.error}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   )
 }
 
@@ -169,9 +97,6 @@ export default function AlertPanel() {
           />
         </div>
       </div>
-
-      {/* Auto-Start Pitchers */}
-      <AutoStartButton />
 
       {/* Empty Roster Slots */}
       <div className="mb-5">

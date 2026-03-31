@@ -77,8 +77,11 @@ export const dashboardApi = {
 export interface AutoStartResult {
   date: string
   league: string
-  from_bench: string | null
-  to_bench: string | null
+  my_team: string
+  started: string | null
+  started_from: string | null
+  benched: string | null
+  benched_from: string | null
   status: 'ok' | 'error'
   error: string | null
 }

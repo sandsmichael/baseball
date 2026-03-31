@@ -1574,8 +1574,11 @@ def auto_start_pitchers(
                         results.append({
                             'date':       day_str,
                             'league':     league_name,
-                            'from_bench': starter['name'],
-                            'to_bench':   sit_out['name'],
+                            'my_team':    lrow.get('team_name', ''),
+                            'started':    starter['name'],
+                            'started_from': sit_out['slot'],
+                            'benched':    sit_out['name'],
+                            'benched_from': 'SP',
                             'status':     'ok',
                             'error':      None,
                         })
@@ -1584,8 +1587,11 @@ def auto_start_pitchers(
                         results.append({
                             'date':       day_str,
                             'league':     league_name,
-                            'from_bench': starter['name'],
-                            'to_bench':   sit_out['name'],
+                            'my_team':    lrow.get('team_name', ''),
+                            'started':    starter['name'],
+                            'started_from': sit_out['slot'],
+                            'benched':    sit_out['name'],
+                            'benched_from': 'SP',
                             'status':     'error',
                             'error':      str(e),
                         })
@@ -1596,8 +1602,11 @@ def auto_start_pitchers(
                 results.append({
                     'date':       day_str,
                     'league':     league_name,
-                    'from_bench': None,
-                    'to_bench':   None,
+                    'my_team':    lrow.get('team_name', ''),
+                    'started':    None,
+                    'started_from': None,
+                    'benched':    None,
+                    'benched_from': None,
                     'status':     'error',
                     'error':      str(e),
                 })
