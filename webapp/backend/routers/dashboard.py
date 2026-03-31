@@ -26,6 +26,7 @@ from yahoo import (
     benched_starters,
     all_matchup_scores,
     lineup_scratches,
+    auto_start_pitchers,
 )
 
 from ..config import CREDS_FILE, SEASON, DEFAULT_PROJ_SYSTEM
@@ -277,6 +278,16 @@ def get_matchup_scores(refresh: bool = Query(False)):
         results = all_matchup_scores(leagues_df, CREDS_FILE, SEASON)
         cache.set(key, results)
         return {'matchups': results, 'cached_age': cache.age(key)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={'error': str(e)})
+
+
+@router.post('/dashboard/auto-start-pitchers')
+def post_auto_start_pitchers(days: int = Query(6, ge=1, le=14)):
+    try:
+        leagues_df = _get_leagues_df()
+        results = auto_start_pitchers(leagues_df, CREDS_FILE, SEASON, days=days)
+        return {'results': results, 'total': len(results)}
     except Exception as e:
         return JSONResponse(status_code=500, content={'error': str(e)})
 

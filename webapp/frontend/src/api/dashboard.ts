@@ -67,6 +67,20 @@ export const dashboardApi = {
     api.get<{ candidates: LineupScratch[]; cached_age: number | null }>(
       `/dashboard/lineup-scratches${refresh ? '?refresh=true' : ''}`
     ),
+
+  autoStartPitchers: (days = 6) =>
+    api.post<{ results: AutoStartResult[]; total: number }>(
+      `/dashboard/auto-start-pitchers?days=${days}`, {}
+    ),
+}
+
+export interface AutoStartResult {
+  date: string
+  league: string
+  from_bench: string | null
+  to_bench: string | null
+  status: 'ok' | 'error'
+  error: string | null
 }
 
 export interface MatchupStat {

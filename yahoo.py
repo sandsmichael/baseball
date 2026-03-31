@@ -1436,6 +1436,175 @@ def lineup_scratches(
     )
 
 
+def auto_start_pitchers(
+    leagues_df: pd.DataFrame,
+    creds_file: str,
+    season: int = None,
+    days: int = 6,
+) -> list[dict]:
+    """
+    For every league and each of the next `days` calendar days, swap SP-slotted
+    pitchers who are NOT confirmed starting that day with bench pitchers who ARE
+    confirmed starting (green checkmark / is_starting == 1).
+
+    Rules:
+    - Only touches SP slots — RP slots and batter slots are never changed.
+    - A bench pitcher must be SP-eligible to be moved into an SP slot.
+    - Does not move RPs into SP slots.
+    - One-to-one pairing per day: for each inactive SP slot, take the next
+      available bench starter. Surplus bench starters are left alone.
+
+    Args:
+        leagues_df: DataFrame from Yahoo.list_leagues() with league_id, league_key, etc.
+        creds_file: Path to yahoo_oauth.json.
+        season:     Season year (defaults to current calendar year).
+        days:       Number of upcoming calendar days to optimise (default 6).
+
+    Returns:
+        List of dicts describing each swap attempted:
+            date, league, from_bench, to_bench, status, error
+    """
+    from datetime import timedelta
+
+    _PITCHER_POS = {'SP', 'RP', 'P'}
+    _BENCH_LIKE  = {'BN', 'IL', 'IL+', 'IL10', 'IL15', 'IL60', 'DL', 'DL15', 'DL60', 'NA', 'NA+', 'IR'}
+
+    season = season or date.today().year
+    dates  = [(date.today() + timedelta(days=d)).isoformat() for d in range(days)]
+
+    if _token_is_expired(creds_file):
+        _refresh_tokens(creds_file)
+    oauth = OAuth2(None, None, from_file=creds_file)
+
+    def _api_get(path: str) -> dict:
+        nonlocal oauth
+        if _token_is_expired(creds_file):
+            _refresh_tokens(creds_file)
+            oauth = OAuth2(None, None, from_file=creds_file)
+        resp = oauth.session.get(f'{BASE}{path}?format=json')
+        resp.raise_for_status()
+        return resp.json()
+
+    results = []
+
+    # Cache Yahoo instances per league_id so we reuse the browser session
+    yf_cache: dict[str, 'Yahoo'] = {}
+
+    for _, lrow in leagues_df.iterrows():
+        league_name = lrow['name']
+        league_key  = lrow['league_key']
+        league_id   = lrow['league_id']
+
+        try:
+            # Find my team key (once per league)
+            teams_data = _api_get(f'/league/{league_key}/teams')['fantasy_content']['league'][1]['teams']
+            team_key = None
+            for i in range(teams_data['count']):
+                flat = Yahoo._flat(teams_data[str(i)]['team'][0])
+                if flat.get('is_owned_by_current_login') == 1:
+                    team_key = flat['team_key']
+                    break
+            if not team_key:
+                continue
+
+        except Exception as e:
+            print(f'  auto-start-pitchers: could not resolve team for {league_name}: {e}')
+            continue
+
+        for day_str in dates:
+            try:
+                # Fetch roster snapshot for this specific date with starting_status
+                data    = _api_get(f'/team/{team_key}/roster;date={day_str};out=starting_status')
+                players = data['fantasy_content']['team'][1]['roster']['0']['players']
+
+                inactive_sp: list[dict] = []    # SP-slotted, NOT confirmed starting
+                bench_starters: list[dict] = []  # On bench, confirmed starting, SP-eligible
+
+                for i in range(players['count']):
+                    p        = players[str(i)]['player']
+                    flat     = Yahoo._flat(p[0])
+                    pos_flat = Yahoo._flat(p[1].get('selected_position', []))
+                    slot     = pos_flat.get('position', '')
+
+                    positions   = flat.get('display_position', '')
+                    eligible_ep = flat.get('eligible_positions', {})
+                    eligibles   = Yahoo._eligible(eligible_ep)
+                    pos_set     = {pp.strip() for pp in positions.split(',') if pp.strip()}
+
+                    # Only pitchers
+                    if not pos_set.intersection(_PITCHER_POS):
+                        continue
+
+                    # Parse starting_status
+                    ss_raw = p[1].get('starting_status', {})
+                    ss     = Yahoo._flat(ss_raw) if isinstance(ss_raw, list) else (ss_raw or {})
+                    is_starting = ss.get('is_starting')  # '1' = green, '0' = red X, None = unknown
+
+                    player_info = {
+                        'name':       Yahoo._name(flat.get('name', '')),
+                        'player_key': flat.get('player_key', ''),
+                        'slot':       slot,
+                        'eligibles':  eligibles,
+                        'is_starting': is_starting,
+                    }
+
+                    if slot == 'SP':
+                        # SP-slotted but not confirmed starting → candidate to sit
+                        if str(is_starting) != '1':
+                            inactive_sp.append(player_info)
+                    elif slot in _BENCH_LIKE:
+                        # On bench, confirmed starting, SP-eligible
+                        if str(is_starting) == '1' and 'SP' in eligibles:
+                            bench_starters.append(player_info)
+
+                pairs = list(zip(inactive_sp, bench_starters))
+
+                if not pairs:
+                    print(f'  {league_name} [{day_str}]: no SP swaps needed')
+                    continue
+
+                # Lazy-init Yahoo instance for this league
+                if league_id not in yf_cache:
+                    yf_cache[league_id] = Yahoo(league_id, season=season, creds_file=creds_file).fetch()
+                yf = yf_cache[league_id]
+
+                for sit_out, starter in pairs:
+                    try:
+                        yf.swap(sit_out['name'], starter['name'], day_str)
+                        results.append({
+                            'date':       day_str,
+                            'league':     league_name,
+                            'from_bench': starter['name'],
+                            'to_bench':   sit_out['name'],
+                            'status':     'ok',
+                            'error':      None,
+                        })
+                        print(f'  {league_name} [{day_str}]: {starter["name"]} → SP, {sit_out["name"]} → BN')
+                    except Exception as e:
+                        results.append({
+                            'date':       day_str,
+                            'league':     league_name,
+                            'from_bench': starter['name'],
+                            'to_bench':   sit_out['name'],
+                            'status':     'error',
+                            'error':      str(e),
+                        })
+                        print(f'  {league_name} [{day_str}]: swap failed ({starter["name"]} ↔ {sit_out["name"]}): {e}')
+
+            except Exception as e:
+                print(f'  auto-start-pitchers error ({league_name} [{day_str}]): {e}')
+                results.append({
+                    'date':       day_str,
+                    'league':     league_name,
+                    'from_bench': None,
+                    'to_bench':   None,
+                    'status':     'error',
+                    'error':      str(e),
+                })
+
+    return results
+
+
 def _fetch_fg_projections(stats_type: str, proj_system: str = 'atc') -> pd.DataFrame:
     """
     Fetch FanGraphs projections directly from the API without pool filtering.
